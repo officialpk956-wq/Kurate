@@ -45,8 +45,13 @@ st.markdown("""
 h1, h2, h3, h4, h5, h6, .wordmark, .zero-result-title {
   font-family: 'Newsreader', serif !important;
 }
-html, body, p, span, div, button, input, select {
+.kurate-card, .kurate-header, .badge, .metric-label, .metric-val, 
+.sidebar-header, .high-trust-warning, .card-author, .card-text, 
+[data-testid="stMarkdownContainer"], [data-testid="stText"] {
   font-family: 'Public Sans', sans-serif !important;
+}
+[data-testid="stIconMaterial"], .material-symbols-rounded, .material-symbols-outlined, [class*="material-icon"] {
+  font-family: 'Material Symbols Rounded', 'Material Symbols Outlined' !important;
 }
 
 /* Header styling */
