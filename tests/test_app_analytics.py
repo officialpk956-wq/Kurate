@@ -37,12 +37,16 @@ def test_trust_slider_does_not_duplicate_search_submitted():
 def test_query_change_creates_new_query_id_and_search_submitted():
     at = AppTest.from_file("../app.py").run()
     query_id_before = at.session_state["current_query_id"]
+    execution_id_before = at.session_state["current_execution_id"]
 
     at.text_input(key="query").set_value("insurance industry").run()
 
     events = at.session_state["event_log"]
     assert sum(1 for e in events if e["event_name"] == "search_submitted") == 2
     assert at.session_state["current_query_id"] != query_id_before
+    newest_submit = [e for e in events if e["event_name"] == "search_submitted"][0]
+    assert newest_submit["search_execution_id"] == at.session_state["current_execution_id"]
+    assert newest_submit["search_execution_id"] != execution_id_before
 
 
 def test_retry_creates_new_execution_id():
@@ -113,6 +117,22 @@ def test_semantic_timeout_emits_search_degraded():
     degraded = [e for e in events if e["event_name"] == "search_degraded" and e.get("failure_reason") == "semantic_timeout"]
     assert len(degraded) == 1
     assert degraded[0]["degraded_mode"] == "keyword_only"
+
+
+def test_partial_mode_preserves_retrieved_count_before_truncation():
+    at = AppTest.from_file("../app.py").run()
+    at.selectbox(key="failure_sim").select("Partial results only").run()
+
+    received = [e for e in at.session_state["event_log"] if e["event_name"] == "results_received"][0]
+    assert received["surface"] == "for_you"
+    assert received["retrieved_count"] > received["available_to_reranker_count"]
+    assert received["available_to_reranker_count"] == 1
+
+
+def test_render_event_names_the_measured_surface():
+    at = AppTest.from_file("../app.py").run()
+    rendered = [e for e in at.session_state["event_log"] if e["event_name"] == "results_rendered"][0]
+    assert rendered["surface"] == "for_you"
 
 
 def test_result_actions_reference_correct_query_and_execution_ids():

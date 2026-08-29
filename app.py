@@ -323,7 +323,6 @@ try:
         if is_new_query:
             st.session_state["current_query_id"] = str(uuid.uuid4())
             st.session_state["last_query_text"] = norm_q
-            log_app_event("search_submitted", query=query)
 
         # search_execution_id identifies one ATTEMPT to fulfill that intent. A new
         # attempt starts whenever the query text, ranking inputs, or simulated failure
@@ -343,6 +342,10 @@ try:
             previous_execution_id = st.session_state.get("current_execution_id")
             st.session_state["current_execution_id"] = str(uuid.uuid4())
             st.session_state["last_execution_context"] = current_execution_context
+            # Submission is logged only after the matching execution ID exists, so a
+            # new textual query can never inherit the previous query's execution ID.
+            if is_new_query:
+                log_app_event("search_submitted", query=query)
             if retry_triggered:
                 log_app_event("search_retried", query=query, previous_execution_id=previous_execution_id)
             st.session_state["last_retry_nonce"] = st.session_state["retry_nonce"]
@@ -364,13 +367,16 @@ try:
             if is_new_execution:
                 log_app_event("search_degraded", failure_reason="semantic_timeout", degraded_mode="keyword_only")
             sem_res = []
-            hybrid = retrieval.hybrid_search(query, posts, top_k=30, semantic_enabled=False)
+            hybrid_candidates = retrieval.hybrid_search(query, posts, top_k=30, semantic_enabled=False)
             st.warning("Partial results — semantic search unavailable")
         else:
             sem_res_candidates = retrieval.semantic_search(query, posts, top_k=10)
             sem_res_candidates = [r for r in sem_res_candidates if r.get("semantic_score", 0) > retrieval.SEMANTIC_FLOOR]
             sem_res = [r for r in sem_res_candidates if r['post_id'] not in st.session_state["hidden_results"]][:5]
-            hybrid = retrieval.hybrid_search(query, posts, top_k=30)
+            hybrid_candidates = retrieval.hybrid_search(query, posts, top_k=30)
+
+        retrieved_count = len(hybrid_candidates)
+        hybrid = hybrid_candidates
         
         if failure_sim == "Partial results only":
             if is_new_execution:
@@ -390,7 +396,15 @@ try:
         # (logged later, after the cards actually draw) confirms the screen really
         # painted that many — kept distinct from "the backend returned N".
         if is_new_execution:
-            log_app_event("results_received", retrieved_count=len(hybrid), displayed_count=len(valid_reranked), latency_ms=latency, index_age_ms=0)
+            log_app_event(
+                "results_received",
+                surface="for_you",
+                retrieved_count=retrieved_count,
+                available_to_reranker_count=len(hybrid),
+                displayed_count=len(valid_reranked),
+                latency_ms=latency,
+                index_age_ms=0,
+            )
 
         for_you_render_stats = {"rendered_count": 0}
 
@@ -569,7 +583,12 @@ try:
         # results_received means "the backend returned data", whereas results_rendered means 
         # "the member's screen actually painted it".
         if is_new_execution:
-            log_app_event("results_rendered", rendered_count=for_you_render_stats["rendered_count"], displayed_count=len(valid_reranked))
+            log_app_event(
+                "results_rendered",
+                surface="for_you",
+                rendered_count=for_you_render_stats["rendered_count"],
+                displayed_count=len(valid_reranked),
+            )
                     
         # 9. People matching your search
         st.markdown("---")

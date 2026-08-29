@@ -65,6 +65,47 @@ def test_empty_string_queries(data):
     
     ps = people_search(empty_query, people)
     assert isinstance(ps, list)
+    assert kw == []
+    assert sem == []
+    assert hyb == []
+    assert ps == []
+
+
+def test_oov_semantic_query_returns_no_arbitrary_results(data):
+    posts, _, _ = data
+    assert semantic_search("zxqwyxyz", posts) == []
+
+
+def test_non_positive_top_k_returns_empty(data):
+    posts, people, _ = data
+    assert keyword_search("climate", posts, top_k=0) == []
+    assert semantic_search("climate", posts, top_k=-1) == []
+    assert hybrid_search("climate", posts, top_k=0) == []
+    assert people_search("climate", people, top_k=-1) == []
+
+
+def test_post_index_invalidates_after_in_place_content_change(data):
+    posts, _, _ = data
+    original = posts[0].text
+    try:
+        posts[0].text = "uniquecacheinvalidationsentinel"
+        matches = keyword_search("uniquecacheinvalidationsentinel", posts)
+        assert matches and matches[0]["post_id"] == posts[0].id
+    finally:
+        posts[0].text = original
+        # Force restoration of the cached index for subsequent tests.
+        keyword_search("climate", posts)
+
+
+def test_trust_weight_is_clamped(data):
+    posts, _, follow_edges = data
+    hybrid = hybrid_search("climate risk", posts)
+    above = rerank_with_trust(hybrid, DEMO_USER_ID, follow_edges, trust_weight=10)
+    one = rerank_with_trust(hybrid, DEMO_USER_ID, follow_edges, trust_weight=1)
+    below = rerank_with_trust(hybrid, DEMO_USER_ID, follow_edges, trust_weight=-10)
+    zero = rerank_with_trust(hybrid, DEMO_USER_ID, follow_edges, trust_weight=0)
+    assert [r["post_id"] for r in above] == [r["post_id"] for r in one]
+    assert [r["post_id"] for r in below] == [r["post_id"] for r in zero]
 
 def test_trust_distance_self(data):
     _, _, follow_edges = data

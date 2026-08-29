@@ -1,5 +1,4 @@
 import datetime
-import uuid
 
 def log_event(event_name: str, **properties):
     """
@@ -21,6 +20,8 @@ def log_event(event_name: str, **properties):
             **properties
         }
         st.session_state["event_log"].insert(0, event) # prepend so newest is first
+        # Keep the internal demo log bounded during long evaluation sessions.
+        del st.session_state["event_log"][500:]
     except Exception:
         # Outside of a streamlit script run context, st.session_state will raise an error.
         # We catch and ignore it so tests don't crash when testing retrieval logic directly.

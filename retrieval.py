@@ -53,14 +53,22 @@ class SearchIndex:
         return text.split()
 
 _INDEX = None
+_INDEX_KEY = None
+
+def _posts_cache_key(posts: List[Post]):
+    return tuple((p.id, p.author_id, p.text, p.topic, p.timestamp.isoformat()) for p in posts)
 
 def get_index(posts: List[Post]) -> SearchIndex:
-    global _INDEX
-    if _INDEX is None:
+    global _INDEX, _INDEX_KEY
+    current_key = _posts_cache_key(posts)
+    if _INDEX is None or _INDEX_KEY != current_key:
         _INDEX = SearchIndex(posts)
+        _INDEX_KEY = current_key
     return _INDEX
 
 def keyword_search(query: str, posts: List[Post], top_k: int = 10) -> List[Dict]:
+    if not query or not query.strip() or top_k <= 0 or not posts:
+        return []
     idx = get_index(posts)
     tokenized_query = idx._tokenize(query)
     scores = idx.bm25.get_scores(tokenized_query)
@@ -83,8 +91,12 @@ def keyword_search(query: str, posts: List[Post], top_k: int = 10) -> List[Dict]
     return results
 
 def semantic_search(query: str, posts: List[Post], top_k: int = 10) -> List[Dict]:
+    if not query or not query.strip() or top_k <= 0 or not posts:
+        return []
     idx = get_index(posts)
     query_tfidf = idx.vectorizer.transform([query])
+    if query_tfidf.nnz == 0:
+        return []
     query_lsa = idx.svd.transform(query_tfidf)
     
     sims = cosine_similarity(query_lsa, idx.lsa_matrix)[0]
@@ -106,6 +118,8 @@ def semantic_search(query: str, posts: List[Post], top_k: int = 10) -> List[Dict
     return results
 
 def hybrid_search(query: str, posts: List[Post], top_k: int = 10, semantic_enabled: bool = True) -> List[Dict]:
+    if not query or not query.strip() or top_k <= 0 or not posts:
+        return []
     internal_k = max(top_k * 3, 30)
     kw_res = keyword_search(query, posts, top_k=internal_k)
     
@@ -181,8 +195,8 @@ _ADJ_CACHE_KEY = None
 
 def _get_adj_list(follow_edges: List[FollowEdge]) -> Dict[str, set]:
     global _ADJ_CACHE, _ADJ_CACHE_KEY
-    # Cache keyed on the id of the follow_edges object to avoid rebuilding graph per user/query
-    current_key = id(follow_edges)
+    # Content-based key also invalidates when a caller mutates the same list in place.
+    current_key = tuple((e.follower_id, e.followee_id) for e in follow_edges)
     if _ADJ_CACHE_KEY == current_key:
         return _ADJ_CACHE
         
@@ -223,6 +237,7 @@ def rerank_with_trust(hybrid_results: List[Dict], user_id: str, follow_edges: Li
         return []
         
     res_copy = [dict(r) for r in hybrid_results]
+    trust_weight = min(max(float(trust_weight), 0.0), 1.0)
     
     # Cold-start auto-adjust: if user follows no one, cap trust_weight at 0.15
     adj = _get_adj_list(follow_edges)
@@ -284,7 +299,7 @@ _PEOPLE_INDEX_KEY = None
 
 def _get_people_index(people: List[Person]):
     global _PEOPLE_INDEX, _PEOPLE_INDEX_KEY
-    current_key = id(people)
+    current_key = tuple((p.id, p.display_name, p.bio, tuple(p.topics)) for p in people)
     if _PEOPLE_INDEX_KEY == current_key:
         return _PEOPLE_INDEX
         
@@ -303,6 +318,8 @@ def _get_people_index(people: List[Person]):
     return _PEOPLE_INDEX
 
 def people_search(query: str, people: List[Person], top_k: int = 10) -> List[Dict]:
+    if not query or not query.strip() or top_k <= 0 or not people:
+        return []
     bm25, _tokenize = _get_people_index(people)
     query_tokens = _tokenize(query)
     scores = bm25.get_scores(query_tokens)
@@ -322,6 +339,8 @@ def people_search(query: str, people: List[Person], top_k: int = 10) -> List[Dic
     return results[:top_k]
 
 def zero_result_recovery(query: str, user_id: str, people: List[Person], follow_edges: List[FollowEdge], top_k: int = 5) -> List[Dict]:
+    if not query or not query.strip() or top_k <= 0 or not people:
+        return []
     def _tokenize(text: str) -> List[str]:
         text = text.lower()
         for p in string.punctuation:
