@@ -278,16 +278,25 @@ if "saved_results" not in st.session_state:
     st.session_state["saved_results"] = set()
 if "followed_people" not in st.session_state:
     st.session_state["followed_people"] = set()
-if "last_search_context" not in st.session_state:
-    st.session_state["last_search_context"] = None
+if "last_query_text" not in st.session_state:
+    st.session_state["last_query_text"] = None
+if "last_execution_context" not in st.session_state:
+    st.session_state["last_execution_context"] = None
 if "current_query_id" not in st.session_state:
     st.session_state["current_query_id"] = None
-if "last_zero_result_query_id" not in st.session_state:
-    st.session_state["last_zero_result_query_id"] = None
+if "current_execution_id" not in st.session_state:
+    st.session_state["current_execution_id"] = None
+if "retry_nonce" not in st.session_state:
+    st.session_state["retry_nonce"] = 0
+if "last_retry_nonce" not in st.session_state:
+    st.session_state["last_retry_nonce"] = 0
+if "last_zero_result_execution_id" not in st.session_state:
+    st.session_state["last_zero_result_execution_id"] = None
 
 def log_app_event(event_name, **kwargs):
     props = {
         "query_id": st.session_state.get("current_query_id", "N/A"),
+        "search_execution_id": st.session_state.get("current_execution_id", "N/A"),
         "session_id": st.session_state["session_id"],
         "anonymous_user_id": selected_user_id, # stands in for a real anonymized id
         "platform": "streamlit-demo",
@@ -306,53 +315,84 @@ try:
         st.caption("Enter a search term above.")
     else:
         norm_q = query.strip().lower()
-        current_context = (
+
+        # query_id identifies a distinct search INTENT (the text the member typed).
+        # It stays the same across a trust-slider tweak or a retry of the same text —
+        # those are still "the same question", just re-executed under different conditions.
+        is_new_query = (norm_q != st.session_state.get("last_query_text"))
+        if is_new_query:
+            st.session_state["current_query_id"] = str(uuid.uuid4())
+            st.session_state["last_query_text"] = norm_q
+            log_app_event("search_submitted", query=query)
+
+        # search_execution_id identifies one ATTEMPT to fulfill that intent. A new
+        # attempt starts whenever the query text, ranking inputs, or simulated failure
+        # mode change, OR when the member explicitly presses Retry (retry_nonce bump) —
+        # even if none of the other inputs changed.
+        current_execution_context = (
             norm_q,
             trust_weight,
             selected_user_id,
             failure_sim,
+            st.session_state["retry_nonce"],
         )
-        is_new_search = (current_context != st.session_state.get("last_search_context"))
-        
-        if is_new_search:
-            st.session_state["current_query_id"] = str(uuid.uuid4())
-            st.session_state["last_search_context"] = current_context
-            log_app_event("search_submitted", query=query)
+        is_new_execution = (current_execution_context != st.session_state.get("last_execution_context"))
+        retry_triggered = (st.session_state["retry_nonce"] != st.session_state.get("last_retry_nonce", 0))
+
+        if is_new_execution:
+            previous_execution_id = st.session_state.get("current_execution_id")
+            st.session_state["current_execution_id"] = str(uuid.uuid4())
+            st.session_state["last_execution_context"] = current_execution_context
+            if retry_triggered:
+                log_app_event("search_retried", query=query, previous_execution_id=previous_execution_id)
+            st.session_state["last_retry_nonce"] = st.session_state["retry_nonce"]
         
         col1, col2, col3 = st.columns(3)
         
         t0 = time.time()
         if failure_sim == "Index unavailable":
-            if is_new_search:
-                log_app_event("search_degraded", failure_reason="index_unavailable", degraded_mode="error", query_id=st.session_state["current_query_id"])
+            # Distinct from search_degraded: the index being down means we returned
+            # NOTHING, not a lesser result set. That is a hard failure, not a degradation.
+            if is_new_execution:
+                log_app_event("search_failed", failure_reason="index_unavailable")
             raise RuntimeError("Simulated Index Failure")
             
-        kw_res = retrieval.keyword_search(query, posts, top_k=5)
+        kw_res_candidates = retrieval.keyword_search(query, posts, top_k=10)
+        kw_res = [r for r in kw_res_candidates if r['post_id'] not in st.session_state["hidden_results"]][:5]
         
         if failure_sim == "Semantic search timeout":
-            if is_new_search:
-                log_app_event("search_degraded", failure_reason="semantic_timeout", degraded_mode="keyword_only", query_id=st.session_state["current_query_id"])
+            if is_new_execution:
+                log_app_event("search_degraded", failure_reason="semantic_timeout", degraded_mode="keyword_only")
             sem_res = []
             hybrid = retrieval.hybrid_search(query, posts, top_k=30, semantic_enabled=False)
             st.warning("Partial results — semantic search unavailable")
         else:
-            sem_res = retrieval.semantic_search(query, posts, top_k=5)
-            sem_res = [r for r in sem_res if r.get("semantic_score", 0) > retrieval.SEMANTIC_FLOOR]
+            sem_res_candidates = retrieval.semantic_search(query, posts, top_k=10)
+            sem_res_candidates = [r for r in sem_res_candidates if r.get("semantic_score", 0) > retrieval.SEMANTIC_FLOOR]
+            sem_res = [r for r in sem_res_candidates if r['post_id'] not in st.session_state["hidden_results"]][:5]
             hybrid = retrieval.hybrid_search(query, posts, top_k=30)
         
         if failure_sim == "Partial results only":
-            if is_new_search:
-                log_app_event("search_degraded", failure_reason="partial_results", degraded_mode="truncated", query_id=st.session_state["current_query_id"])
+            if is_new_execution:
+                log_app_event("search_degraded", failure_reason="partial_results", degraded_mode="truncated")
             hybrid = hybrid[:1]
             
         reranked = retrieval.rerank_with_trust(hybrid, selected_user_id, follow_edges, trust_weight)
-        valid_reranked = reranked[:5]
-        valid_reranked = [r for r in valid_reranked if r['post_id'] not in st.session_state["hidden_results"]]
+        # Filter hidden results BEFORE truncating to the display slot count, so hiding
+        # one result backfills the next-best candidate instead of just shrinking the list.
+        visible_reranked = [r for r in reranked if r['post_id'] not in st.session_state["hidden_results"]]
+        valid_reranked = visible_reranked[:5]
         
         latency = (time.time() - t0) * 1000
         
-        if is_new_search:
-            log_app_event("results_received", result_count=len(valid_reranked), latency_ms=latency, index_age_ms=0)
+        # retrieved_count: size of the fused candidate pool before rerank/slice/filter.
+        # displayed_count: what we intend to show after backfill (<=5). rendered_count
+        # (logged later, after the cards actually draw) confirms the screen really
+        # painted that many — kept distinct from "the backend returned N".
+        if is_new_execution:
+            log_app_event("results_received", retrieved_count=len(hybrid), displayed_count=len(valid_reranked), latency_ms=latency, index_age_ms=0)
+
+        for_you_render_stats = {"rendered_count": 0}
 
         
         def render_result(res, metrics_dict, rank, hops=None, context="Search"):
@@ -386,6 +426,8 @@ try:
             </div>
             """
             st.markdown(card_html, unsafe_allow_html=True)
+            if context == "ForYou":
+                for_you_render_stats["rendered_count"] += 1
             
             common_props = {
                 "result_id": post_id,
@@ -502,9 +544,9 @@ try:
                 st.markdown('<div class="high-trust-warning">High trust weighting — results are concentrated in your existing network.</div>', unsafe_allow_html=True)
             
             if not valid_reranked:
-                if is_new_search or st.session_state["current_query_id"] != st.session_state.get("last_zero_result_query_id"):
+                if is_new_execution or st.session_state["current_execution_id"] != st.session_state.get("last_zero_result_execution_id"):
                     log_app_event("zero_result_shown")
-                    st.session_state["last_zero_result_query_id"] = st.session_state["current_query_id"]
+                    st.session_state["last_zero_result_execution_id"] = st.session_state["current_execution_id"]
                 st.markdown('<div class="zero-result-title">No strong matches — but here\'s who to follow instead</div>', unsafe_allow_html=True)
                 recovery_res = retrieval.zero_result_recovery(query, selected_user_id, people, follow_edges, top_k=5)
                 if not recovery_res:
@@ -526,8 +568,8 @@ try:
         # This is the confirmed-exposure event — DISTINCT from results_received.
         # results_received means "the backend returned data", whereas results_rendered means 
         # "the member's screen actually painted it".
-        if is_new_search:
-            log_app_event("results_rendered", rendered_count=len(valid_reranked))
+        if is_new_execution:
+            log_app_event("results_rendered", rendered_count=for_you_render_stats["rendered_count"], displayed_count=len(valid_reranked))
                     
         # 9. People matching your search
         st.markdown("---")
@@ -546,10 +588,12 @@ except RuntimeError as e:
     if str(e) == "Simulated Index Failure":
         st.error("Search is temporarily unavailable — we couldn't reach the index. Your search term is still here.")
         if st.button("Retry search", key="retry_index_failure"):
+            st.session_state["retry_nonce"] += 1
             st.rerun()
     else:
         st.error("An error occurred while running the search.")
         if st.button("Retry search", key="retry_runtime_error"):
+            st.session_state["retry_nonce"] += 1
             st.rerun()
     if DEBUG_MODE:
         with st.expander("Details"):
@@ -557,6 +601,7 @@ except RuntimeError as e:
 except Exception as e:
     st.error("An error occurred while running the search.")
     if st.button("Retry search", key="retry_generic_error"):
+        st.session_state["retry_nonce"] += 1
         st.rerun()
     if DEBUG_MODE:
         with st.expander("Details"):
