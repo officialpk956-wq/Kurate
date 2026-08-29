@@ -237,7 +237,8 @@ with st.sidebar:
             (corpus.DEMO_USER_ID, "Demo member (Follows 5 people)"),
             (corpus.COLD_START_USER_ID, "New member (Follows 0 people)")
         ],
-        format_func=lambda x: x[1]
+        format_func=lambda x: x[1],
+        key="viewing_as"
     )
     selected_user_id = user_choice[0]
     st.session_state["user_id"] = selected_user_id
@@ -259,7 +260,8 @@ with st.sidebar:
     with st.expander("⚠ Simulate failure (for demo purposes)"):
         failure_sim = st.selectbox(
             "Failure mode", 
-            ["None", "Semantic search timeout", "Index unavailable", "Partial results only"]
+            ["None", "Semantic search timeout", "Index unavailable", "Partial results only"],
+            key="failure_sim"
         )
 
 # Session state initialization
@@ -271,8 +273,8 @@ if "saved_results" not in st.session_state:
     st.session_state["saved_results"] = set()
 if "followed_people" not in st.session_state:
     st.session_state["followed_people"] = set()
-if "last_executed_query" not in st.session_state:
-    st.session_state["last_executed_query"] = None
+if "last_search_context" not in st.session_state:
+    st.session_state["last_search_context"] = None
 if "current_query_id" not in st.session_state:
     st.session_state["current_query_id"] = None
 if "last_zero_result_query_id" not in st.session_state:
@@ -299,22 +301,32 @@ try:
         st.caption("Enter a search term above.")
     else:
         norm_q = query.strip().lower()
-        is_new_search = (norm_q != st.session_state.get("last_executed_query"))
+        current_context = (
+            norm_q,
+            trust_weight,
+            selected_user_id,
+            failure_sim,
+        )
+        is_new_search = (current_context != st.session_state.get("last_search_context"))
         
         if is_new_search:
             st.session_state["current_query_id"] = str(uuid.uuid4())
-            st.session_state["last_executed_query"] = norm_q
+            st.session_state["last_search_context"] = current_context
             log_app_event("search_submitted", query=query)
         
         col1, col2, col3 = st.columns(3)
         
         t0 = time.time()
         if failure_sim == "Index unavailable":
+            if is_new_search:
+                log_app_event("search_degraded", failure_reason="index_unavailable", degraded_mode="error", query_id=st.session_state["current_query_id"])
             raise RuntimeError("Simulated Index Failure")
             
         kw_res = retrieval.keyword_search(query, posts, top_k=5)
         
         if failure_sim == "Semantic search timeout":
+            if is_new_search:
+                log_app_event("search_degraded", failure_reason="semantic_timeout", degraded_mode="keyword_only", query_id=st.session_state["current_query_id"])
             sem_res = []
             hybrid = retrieval.hybrid_search(query, posts, top_k=30, semantic_enabled=False)
             st.warning("Partial results — semantic search unavailable")
@@ -324,18 +336,18 @@ try:
             hybrid = retrieval.hybrid_search(query, posts, top_k=30)
         
         if failure_sim == "Partial results only":
+            if is_new_search:
+                log_app_event("search_degraded", failure_reason="partial_results", degraded_mode="truncated", query_id=st.session_state["current_query_id"])
             hybrid = hybrid[:1]
             
         reranked = retrieval.rerank_with_trust(hybrid, selected_user_id, follow_edges, trust_weight)
         valid_reranked = reranked[:5]
+        valid_reranked = [r for r in valid_reranked if r['post_id'] not in st.session_state["hidden_results"]]
         
         latency = (time.time() - t0) * 1000
         
         if is_new_search:
-            if failure_sim == "Semantic search timeout":
-                log_app_event("results_received", result_count=len(valid_reranked), latency_ms=latency, index_age_ms=0, degraded_mode="keyword_only", failure_reason="semantic_timeout")
-            else:
-                log_app_event("results_received", result_count=len(valid_reranked), latency_ms=latency, index_age_ms=0)
+            log_app_event("results_received", result_count=len(valid_reranked), latency_ms=latency, index_age_ms=0)
 
         
         def render_result(res, metrics_dict, rank, hops=None, context="Search"):
@@ -468,7 +480,7 @@ try:
                 st.caption("No results.")
             else:
                 for i, res in enumerate(kw_res, 1):
-                    render_result(res, {"Keyword": res["keyword_score"]}, i)
+                    render_result(res, {"Keyword": res["keyword_score"]}, i, context="Keyword")
                     
         with col2:
             st.markdown('<div class="col-header">Related content</div><div class="col-caption">Finds posts on the same topic, even without matching words</div>', unsafe_allow_html=True)
@@ -476,7 +488,7 @@ try:
                 st.caption("No results.")
             else:
                 for i, res in enumerate(sem_res, 1):
-                    render_result(res, {"Semantic": res["semantic_score"]}, i)
+                    render_result(res, {"Semantic": res["semantic_score"]}, i, context="Semantic")
                     
         with col3:
             st.markdown('<div class="col-header">For you</div><div class="col-caption">Ranked by relevance and who you trust</div>', unsafe_allow_html=True)
@@ -503,7 +515,7 @@ try:
                         "Trust Score": res.get("trust_score", 0.0),
                         "Final": res.get("final_score", 0.0)
                     }
-                    render_result(res, metrics, i, res.get("trust_hops", None))
+                    render_result(res, metrics, i, res.get("trust_hops", None), context="ForYou")
                     
         # Fired AFTER the result cards actually render to the page.
         # This is the confirmed-exposure event — DISTINCT from results_received.
