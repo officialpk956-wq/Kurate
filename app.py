@@ -542,8 +542,22 @@ try:
                     p["trust_hops"] = retrieval.trust_distance(selected_user_id, p["person_id"], follow_edges)
                     render_person_card(p, "Search")
                         
+except RuntimeError as e:
+    if str(e) == "Simulated Index Failure":
+        st.error("Search is temporarily unavailable — we couldn't reach the index. Your search term is still here.")
+        if st.button("Retry search", key="retry_index_failure"):
+            st.rerun()
+    else:
+        st.error("An error occurred while running the search.")
+        if st.button("Retry search", key="retry_runtime_error"):
+            st.rerun()
+    if DEBUG_MODE:
+        with st.expander("Details"):
+            st.exception(e)
 except Exception as e:
     st.error("An error occurred while running the search.")
+    if st.button("Retry search", key="retry_generic_error"):
+        st.rerun()
     if DEBUG_MODE:
         with st.expander("Details"):
             st.exception(e)
