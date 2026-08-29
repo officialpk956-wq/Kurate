@@ -1,0 +1,7 @@
+numpy
+rank_bm25
+scikit-learn
+streamlit
+
+# Dev dependencies (not needed at runtime)
+pytest
